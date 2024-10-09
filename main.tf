@@ -32,7 +32,7 @@ resource "aws_subnet" "dmz_subnet" {
     availability_zone = var.az
  
   tags = {
-    Name =  "SDK-dmz-sunet}"
+    Name =  "SDK-dmz-subnet}"
   }
 }
 
@@ -51,7 +51,7 @@ resource "aws_nat_gateway" "nat" {
   tags = {
     Name ="SDK-nat-gw"
   }
-#   depends_on = [ aws_internet_gateway.sdk-igw ]
+ depends_on = [aws_internet_gateway.sdk-igw]
 }
 //create EIP for NAT    
 resource "aws_eip" "nat-eip" {
@@ -158,25 +158,24 @@ resource "aws_ecs_cluster" "app-ecs-cluster" {
 //ecs task defination
 resource "aws_ecs_task_definition" "app-ecs-task-defination" {
   family = "app-ecs-task-defination"
-   container_definitions = jsonencode([
-    {
-      name      = "app"
-      image     = "${aws_ecr_repository.app-ecr-repo.repository_url}:latest"
-      cpu       = 256
-      memory    = 512
-      essential = true
-      portMappings = [{
-        containerPort = 80
-        hostPort      = 80  
-      }]
-    }
-  ])
-  network_mode = "awsvpc"
-requires_compatibilities = ["FARGATE"]
-cpu = "256"
-memory = "512"
-execution_role_arn       = aws_iam_role.ecs_task_execution_role.arn
+  container_definitions = jsonencode([{
+    name      = "app"
+    image     = "${aws_ecr_repository.app-ecr-repo.repository_url}:latest"
+    cpu       = 256
+    memory    = 512
+    essential = true
+    portMappings = [{
+      containerPort = 80
+      hostPort      = 80  
+    }]
+  }])
+  network_mode            = "awsvpc"
+  requires_compatibilities = ["FARGATE"]
+  cpu                      = "256"
+  memory                   = "512"
+  execution_role_arn       = aws_iam_role.ecs_task_execution_role.arn
 }
+
 
 //app security group
 resource "aws_security_group" "app-sg" {
@@ -191,7 +190,7 @@ resource "aws_security_group" "app-sg" {
   egress {
     from_port = 0
     to_port = 0
-    protocol = "tcp"
+    protocol = "-1"
     cidr_blocks = ["0.0.0.0/0"]
   }
 }
@@ -205,6 +204,7 @@ desired_count = 1
 network_configuration {
   subnets = [aws_subnet.app_subnet.id]
   security_groups = [aws_security_group.app-sg.id]
+  assign_public_ip = false
 }
 }
 
@@ -230,3 +230,54 @@ resource "aws_iam_role_policy_attachment" "ecs_task_execution_role_policy_attach
   policy_arn = "arn:aws:iam::aws:policy/service-role/AmazonECSTaskExecutionRolePolicy"
 }
 
+resource "aws_launch_configuration" "ecs_launch_config" {
+  name = "ecs_launch_config"
+  image_id = var.ec2_ami
+  instance_type = var.instance_type
+ key_name =  "tf-key"
+ security_groups = ["aws_security_group.app-sg"]
+ iam_instance_profile = aws_iam_instance_profile.ecs_instance_profile.name
+ user_data = <<EOF
+ #!/bin/bash
+ echo ECS_CLUSTER=app-ecs-cluster
+ >> /etc/ecs/ecs.config
+ EOF
+}
+resource "aws_autoscaling_group" "ecs_asg" {
+  launch_configuration = aws_launch_configuration.ecs_launch_config.id
+  min_size = 1
+  max_size = 1
+  desired_capacity = 2
+  vpc_zone_identifier = [aws_subnet.app_subnet.id]
+
+  tag {
+    key = "Name"
+    value = "app-instance"
+    propagate_at_launch = true
+  }
+}
+resource "aws_iam_role" "ecs_instance_role" {
+  name = "ecsInstanceRole"
+
+  assume_role_policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [
+      {
+        Action = "sts:AssumeRole"
+        Effect = "Allow"
+        Principal = {
+          Service = "ec2.amazonaws.com"
+        }
+      }
+    ]
+  })
+}
+
+resource "aws_iam_role_policy_attachment" "ecs_instance_role_policy" {
+  role       = aws_iam_role.ecs_instance_role.name
+  policy_arn = "arn:aws:iam::aws:policy/service-role/AmazonEC2ContainerServiceforEC2Role"
+}
+resource "aws_iam_instance_profile" "ecs_instance_profile" {
+  name = "ecsInstanceProfile"
+  role = aws_iam_role.ecs_instance_role.name
+}
